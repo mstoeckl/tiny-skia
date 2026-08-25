@@ -50,8 +50,9 @@ use arrayvec::ArrayVec;
 
 use tiny_skia_path::{IntSize, NormalizedF32};
 
+use crate::color::PremultipliedColorF16;
 use crate::mask::SubMaskMut;
-use crate::{Color, PremultipliedColor, PremultipliedColorU8, SpreadMode};
+use crate::{Color, PixelType, PremultipliedColor, PremultipliedColorU8, SpreadMode};
 use crate::{PixmapRef, Transform};
 
 pub use blitter::RasterPipelineBlitter;
@@ -154,10 +155,28 @@ pub const STAGES_COUNT: usize = Stage::GammaCompressSrgb as usize + 1;
 
 impl PixmapRef<'_> {
     #[inline(always)]
-    pub(crate) fn gather(&self, index: u32x8) -> [PremultipliedColorU8; highp::STAGE_WIDTH] {
+    pub(crate) fn gather_u8888(&self, index: u32x8) -> [PremultipliedColorU8; highp::STAGE_WIDTH] {
         let index: [u32; 8] = bytemuck::cast(index);
         let data = self.data();
         bytemuck::cast::<[[u8; 4]; highp::STAGE_WIDTH], _>([
+            *data[index[0] as usize..].first_chunk().unwrap(),
+            *data[index[1] as usize..].first_chunk().unwrap(),
+            *data[index[2] as usize..].first_chunk().unwrap(),
+            *data[index[3] as usize..].first_chunk().unwrap(),
+            *data[index[4] as usize..].first_chunk().unwrap(),
+            *data[index[5] as usize..].first_chunk().unwrap(),
+            *data[index[6] as usize..].first_chunk().unwrap(),
+            *data[index[7] as usize..].first_chunk().unwrap(),
+        ])
+    }
+
+    pub(crate) fn gather_f16161616(
+        &self,
+        index: u32x8,
+    ) -> [PremultipliedColorF16; highp::STAGE_WIDTH] {
+        let index: [u32; 8] = bytemuck::cast(index);
+        let data = self.data();
+        bytemuck::cast::<[[u8; 8]; highp::STAGE_WIDTH], _>([
             *data[index[0] as usize..].first_chunk().unwrap(),
             *data[index[1] as usize..].first_chunk().unwrap(),
             *data[index[2] as usize..].first_chunk().unwrap(),
@@ -196,24 +215,28 @@ impl<'b> GenericPixmapMut<'b> {
     }
 
     #[inline(always)]
-    pub(crate) fn offset(&self, dx: usize, dy: usize) -> usize {
+    pub(crate) fn offset_u8888(&self, dx: usize, dy: usize) -> usize {
         self.stride * dy + dx * 4
     }
 
     #[inline(always)]
-    pub(crate) fn slice_at_xy(&mut self, dx: usize, dy: usize) -> &mut [PremultipliedColorU8] {
-        let offset = self.offset(dx, dy);
+    pub(crate) fn slice_at_xy_u8888(
+        &mut self,
+        dx: usize,
+        dy: usize,
+    ) -> &mut [PremultipliedColorU8] {
+        let offset = self.offset_u8888(dx, dy);
         let len = (self.size.width() as usize - dx) * 4;
         bytemuck::cast_slice_mut(&mut self.data[offset..offset + len])
     }
 
     #[inline(always)]
-    pub(crate) fn slice4_at_xy(
+    pub(crate) fn slice4_at_xy_u8888(
         &mut self,
         dx: usize,
         dy: usize,
     ) -> &mut [PremultipliedColorU8; highp::STAGE_WIDTH] {
-        let offset = self.offset(dx, dy);
+        let offset = self.offset_u8888(dx, dy);
         bytemuck::cast_mut(
             self.data[offset..]
                 .first_chunk_mut::<{ highp::STAGE_WIDTH * 4 }>()
@@ -222,12 +245,12 @@ impl<'b> GenericPixmapMut<'b> {
     }
 
     #[inline(always)]
-    pub(crate) fn slice16_at_xy(
+    pub(crate) fn slice16_at_xy_u8888(
         &mut self,
         dx: usize,
         dy: usize,
     ) -> &mut [PremultipliedColorU8; lowp::STAGE_WIDTH] {
-        let offset = self.offset(dx, dy);
+        let offset = self.offset_u8888(dx, dy);
         bytemuck::cast_mut(
             self.data[offset..]
                 .first_chunk_mut::<{ lowp::STAGE_WIDTH * 4 }>()
@@ -236,23 +259,67 @@ impl<'b> GenericPixmapMut<'b> {
     }
 
     #[inline(always)]
-    pub(crate) fn offset_mask(&self, dx: usize, dy: usize) -> usize {
+    pub(crate) fn offset_f16161616(&self, dx: usize, dy: usize) -> usize {
+        self.stride * dy + dx * 8
+    }
+
+    #[inline(always)]
+    pub(crate) fn slice_at_xy_f16161616(
+        &mut self,
+        dx: usize,
+        dy: usize,
+    ) -> &mut [PremultipliedColorF16] {
+        let offset = self.offset_f16161616(dx, dy);
+        let len = (self.size.width() as usize - dx) * 8;
+        bytemuck::cast_slice_mut(&mut self.data[offset..offset + len])
+    }
+
+    #[inline(always)]
+    pub(crate) fn slice4_at_xy_f16161616(
+        &mut self,
+        dx: usize,
+        dy: usize,
+    ) -> &mut [PremultipliedColorF16; highp::STAGE_WIDTH] {
+        let offset = self.offset_f16161616(dx, dy);
+        bytemuck::cast_mut(
+            self.data[offset..]
+                .first_chunk_mut::<{ highp::STAGE_WIDTH * 8 }>()
+                .unwrap(),
+        )
+    }
+
+    #[inline(always)]
+    pub(crate) fn slice16_at_xy_f16161616(
+        &mut self,
+        dx: usize,
+        dy: usize,
+    ) -> &mut [PremultipliedColorF16; lowp::STAGE_WIDTH] {
+        let offset = self.offset_f16161616(dx, dy);
+        bytemuck::cast_mut(
+            self.data[offset..]
+                .first_chunk_mut::<{ lowp::STAGE_WIDTH * 8 }>()
+                .unwrap(),
+        )
+    }
+
+    #[inline(always)]
+    pub(crate) fn offset_u8(&self, dx: usize, dy: usize) -> usize {
         self.stride * dy + dx
     }
 
     #[inline(always)]
-    pub(crate) fn slice_mask_at_xy(&mut self, dx: usize, dy: usize) -> &mut [u8] {
-        let offset = self.offset_mask(dx, dy);
-        &mut self.data[offset..]
+    pub(crate) fn slice_mask_at_xy_u8(&mut self, dx: usize, dy: usize) -> &mut [u8] {
+        let offset = self.offset_u8(dx, dy);
+        bytemuck::cast_slice_mut(&mut self.data[offset..])
     }
 
     #[inline(always)]
-    pub(crate) fn slice16_mask_at_xy(
+    pub(crate) fn slice16_mask_at_xy_u8(
         &mut self,
         dx: usize,
         dy: usize,
     ) -> &mut [u8; lowp::STAGE_WIDTH] {
-        let offset = self.offset_mask(dx, dy);
+        let offset = self.offset_u8(dx, dy);
         self.data[offset..].first_chunk_mut().unwrap()
     }
 }
@@ -389,14 +456,32 @@ pub struct TileCtx {
 pub struct RasterPipelineBuilder {
     stages: ArrayVec<Stage, MAX_STAGES>,
     force_hq_pipeline: bool,
+    dst_type: LoadStoreType,
+    src_type: LoadStoreType,
     pub ctx: Context,
 }
 
+pub(crate) enum LoadStoreType {
+    // TODO: add U8, so that this spans the union of mask and pixel variants
+    RgbaF16,
+    RgbaU8,
+}
+impl From<PixelType> for LoadStoreType {
+    fn from(value: PixelType) -> Self {
+        match value {
+            PixelType::Rgba8U => Self::RgbaU8,
+            PixelType::Rgba16F => Self::RgbaF16,
+        }
+    }
+}
+
 impl RasterPipelineBuilder {
-    pub fn new() -> Self {
+    pub fn new(dst_type: LoadStoreType, src_type: LoadStoreType) -> Self {
         RasterPipelineBuilder {
             stages: ArrayVec::new(),
             force_hq_pipeline: false,
+            dst_type,
+            src_type,
             ctx: Context::default(),
         }
     }
@@ -458,6 +543,36 @@ impl RasterPipelineBuilder {
                 .collect();
             functions.push(highp::just_return as highp::StageFn);
 
+            match self.dst_type {
+                LoadStoreType::RgbaU8 => (),
+                LoadStoreType::RgbaF16 => {
+                    for fun in &mut functions {
+                        if highp::fn_ptr(*fun) == highp::fn_ptr(highp::load_dst) {
+                            *fun = highp::load_dst_f16;
+                        } else if highp::fn_ptr(*fun) == highp::fn_ptr(highp::store) {
+                            *fun = highp::store_f16;
+                        } else if highp::fn_ptr(*fun) == highp::fn_ptr(highp::source_over_rgba) {
+                            *fun = highp::source_over_rgba_f16;
+                        }
+                    }
+                }
+            }
+
+            match self.src_type {
+                LoadStoreType::RgbaU8 => (),
+                LoadStoreType::RgbaF16 => {
+                    for fun in &mut functions {
+                        if highp::fn_ptr(*fun) == highp::fn_ptr(highp::gather) {
+                            *fun = highp::gather_f16;
+                        } else if highp::fn_ptr(*fun) == highp::fn_ptr(highp::bilinear) {
+                            *fun = highp::bilinear_f16;
+                        } else if highp::fn_ptr(*fun) == highp::fn_ptr(highp::bicubic) {
+                            *fun = highp::bicubic_f16;
+                        }
+                    }
+                }
+            }
+
             // I wasn't able to reproduce Skia's load_8888_/store_8888_ performance.
             // Skia uses fallthrough switch, which is probably the reason.
             // In Rust, any branching in load/store code drastically affects the performance.
@@ -474,6 +589,16 @@ impl RasterPipelineBuilder {
                     // SourceOverRgba calls load/store manually, without the pipeline,
                     // therefore we have to switch it too.
                     *fun = highp::source_over_rgba_tail as highp::StageFn;
+
+                // RgbaF16 load/store
+                } else if highp::fn_ptr(*fun) == highp::fn_ptr(highp::load_dst_f16) {
+                    *fun = highp::load_dst_f16_tail as highp::StageFn;
+                } else if highp::fn_ptr(*fun) == highp::fn_ptr(highp::store_f16) {
+                    *fun = highp::store_f16_tail as highp::StageFn;
+                } else if highp::fn_ptr(*fun) == highp::fn_ptr(highp::source_over_rgba_f16) {
+                    // SourceOverRgba calls load/store manually, without the pipeline,
+                    // therefore we have to switch it too.
+                    *fun = highp::source_over_rgba_f16_tail as highp::StageFn;
 
                 // U8 load/store
                 } else if highp::fn_ptr(*fun) == highp::fn_ptr(highp::load_dst_u8) {
@@ -498,6 +623,23 @@ impl RasterPipelineBuilder {
                 .collect();
             functions.push(lowp::just_return as lowp::StageFn);
 
+            match self.dst_type {
+                LoadStoreType::RgbaU8 => (),
+                LoadStoreType::RgbaF16 => {
+                    for fun in &mut functions {
+                        if lowp::fn_ptr(*fun) == lowp::fn_ptr(lowp::load_dst) {
+                            *fun = lowp::load_dst_f16;
+                        } else if lowp::fn_ptr(*fun) == lowp::fn_ptr(lowp::store) {
+                            *fun = lowp::store_f16;
+                        } else if lowp::fn_ptr(*fun) == lowp::fn_ptr(lowp::source_over_rgba) {
+                            *fun = lowp::source_over_rgba_f16;
+                        }
+                    }
+                }
+            }
+
+            // No 'src_type' override, samplers use highp
+
             // See above.
             let mut tail_functions = functions.clone();
             for fun in &mut tail_functions {
@@ -510,6 +652,16 @@ impl RasterPipelineBuilder {
                     // SourceOverRgba calls load/store manually, without the pipeline,
                     // therefore we have to switch it too.
                     *fun = lowp::source_over_rgba_tail as lowp::StageFn;
+
+                // RgbaF16 load/store
+                } else if lowp::fn_ptr(*fun) == lowp::fn_ptr(lowp::load_dst_f16) {
+                    *fun = lowp::load_dst_f16_tail as lowp::StageFn;
+                } else if lowp::fn_ptr(*fun) == lowp::fn_ptr(lowp::store_f16) {
+                    *fun = lowp::store_f16_tail as lowp::StageFn;
+                } else if lowp::fn_ptr(*fun) == lowp::fn_ptr(lowp::source_over_rgba_f16) {
+                    // SourceOverRgba calls load/store manually, without the pipeline,
+                    // therefore we have to switch it too.
+                    *fun = lowp::source_over_rgba_f16_tail as lowp::StageFn;
 
                 // U8 load/store
                 } else if lowp::fn_ptr(*fun) == lowp::fn_ptr(lowp::load_dst_u8) {
@@ -614,7 +766,7 @@ mod blend_tests {
 
                 let pixmap_src = PixmapRef::from_bytes(&[0, 0, 0, 0], 1, 1).unwrap();
 
-                let mut p = RasterPipelineBuilder::new();
+                let mut p = RasterPipelineBuilder::new(pixmap.pixel_type().into(), pixmap_src.pixel_type().into());
                 p.set_force_hq_pipeline($is_highp);
                 p.push_uniform_color(Color::from_rgba8(220, 140, 75, 180).premultiply());
                 p.push(Stage::LoadDestination);

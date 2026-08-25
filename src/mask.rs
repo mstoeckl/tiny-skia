@@ -15,7 +15,7 @@ use crate::geom::IntSizeExt;
 use crate::painter::DrawTiler;
 use crate::pipeline::RasterPipelineBlitter;
 use crate::pixmap::PixelType;
-use crate::{scan, PremultipliedColorU8};
+use crate::{scan, PremultipliedColorF16, PremultipliedColorU8};
 use crate::{FillRule, PixmapRef};
 
 /// A mask type.
@@ -79,6 +79,12 @@ impl Mask {
                             *a = p.alpha();
                         }
                     }
+                    PixelType::Rgba16F => {
+                        let pixels: &[PremultipliedColorF16] = bytemuck::cast_slice(row);
+                        for (p, a) in pixels.iter().zip(dst) {
+                            *a = p.to_color().to_color_u8().alpha();
+                        }
+                    }
                 },
                 MaskType::Luminance => {
                     match pixmap.pixel_type() {
@@ -101,6 +107,16 @@ impl Mask {
 
                                 let luma = r * 0.2126 + g * 0.7152 + b * 0.0722;
                                 *ma = ((luma * a) * 255.0).clamp(0.0, 255.0).ceil() as u8;
+                            }
+                        }
+                        PixelType::Rgba16F => {
+                            let pixels: &[PremultipliedColorF16] = bytemuck::cast_slice(row);
+
+                            for (p, ma) in pixels.iter().zip(dst) {
+                                let p = p.to_color().demultiply();
+                                let luma =
+                                    p.red() * 0.2126 + p.green() * 0.7152 + p.blue() * 0.0722;
+                                *ma = ((luma * p.alpha()) * 255.0).clamp(0.0, 255.0).ceil() as u8;
                             }
                         }
                     }

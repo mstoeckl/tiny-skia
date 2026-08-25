@@ -15,10 +15,11 @@ For some reason, we are almost 2x slower. Maybe because Skia uses clang's vector
 and we're using a manual implementation.
 */
 
+use crate::color::PremultipliedColorF16;
+use crate::pipeline::GenericPixmapMut;
 use crate::{PremultipliedColorU8, SpreadMode, PixmapRef};
 
 use crate::geom::ScreenIntRect;
-use crate::pipeline::GenericPixmapMut;
 use crate::wide::{f32x8, i32x8, u32x8};
 
 pub const STAGE_WIDTH: usize = 8;
@@ -270,22 +271,42 @@ fn seed_shader(p: &mut Pipeline) {
 }
 
 pub fn load_dst(p: &mut Pipeline) {
-    load_8888(p.pixmap_dst.slice4_at_xy(p.dx, p.dy), &mut p.dr, &mut p.dg, &mut p.db, &mut p.da);
+    load_8888(p.pixmap_dst.slice4_at_xy_u8888(p.dx, p.dy), &mut p.dr, &mut p.dg, &mut p.db, &mut p.da);
     p.next_stage();
 }
 
 pub fn load_dst_tail(p: &mut Pipeline) {
-    load_8888_tail(p.tail, p.pixmap_dst.slice_at_xy(p.dx, p.dy), &mut p.dr, &mut p.dg, &mut p.db, &mut p.da);
+    load_8888_tail(p.tail, p.pixmap_dst.slice_at_xy_u8888(p.dx, p.dy), &mut p.dr, &mut p.dg, &mut p.db, &mut p.da);
     p.next_stage();
 }
 
 pub fn store(p: &mut Pipeline) {
-    store_8888(&p.r, &p.g, &p.b, &p.a, p.pixmap_dst.slice4_at_xy(p.dx, p.dy));
+    store_8888(&p.r, &p.g, &p.b, &p.a, p.pixmap_dst.slice4_at_xy_u8888(p.dx, p.dy));
     p.next_stage();
 }
 
 pub fn store_tail(p: &mut Pipeline) {
-    store_8888_tail(&p.r, &p.g, &p.b, &p.a, p.tail, p.pixmap_dst.slice_at_xy(p.dx, p.dy));
+    store_8888_tail(&p.r, &p.g, &p.b, &p.a, p.tail, p.pixmap_dst.slice_at_xy_u8888(p.dx, p.dy));
+    p.next_stage();
+}
+
+pub fn load_dst_f16(p: &mut Pipeline) {
+    load_f16161616(p.pixmap_dst.slice4_at_xy_f16161616(p.dx, p.dy), &mut p.dr, &mut p.dg, &mut p.db, &mut p.da);
+    p.next_stage();
+}
+
+pub fn load_dst_f16_tail(p: &mut Pipeline) {
+    load_f16161616_tail(p.tail, p.pixmap_dst.slice_at_xy_f16161616(p.dx, p.dy), &mut p.dr, &mut p.dg, &mut p.db, &mut p.da);
+    p.next_stage();
+}
+
+pub fn store_f16(p: &mut Pipeline) {
+    store_f16161616(&p.r, &p.g, &p.b, &p.a, p.pixmap_dst.slice4_at_xy_f16161616(p.dx, p.dy));
+    p.next_stage();
+}
+
+pub fn store_f16_tail(p: &mut Pipeline) {
+    store_f16161616_tail(&p.r, &p.g, &p.b, &p.a, p.tail, p.pixmap_dst.slice_at_xy_f16161616(p.dx, p.dy));
     p.next_stage();
 }
 
@@ -308,7 +329,14 @@ pub fn store_u8_tail(_: &mut Pipeline) {
 
 pub fn gather(p: &mut Pipeline) {
     let ix = gather_ix(p.pixmap_src, p.r, p.g);
-    load_8888(&p.pixmap_src.gather(ix), &mut p.r, &mut p.g, &mut p.b, &mut p.a);
+    load_8888(&p.pixmap_src.gather_u8888(ix), &mut p.r, &mut p.g, &mut p.b, &mut p.a);
+
+    p.next_stage();
+}
+
+pub fn gather_f16(p: &mut Pipeline) {
+    let ix = gather_ix_f16(p.pixmap_src, p.r, p.g);
+    load_f16161616(&p.pixmap_src.gather_f16161616(ix), &mut p.r, &mut p.g, &mut p.b, &mut p.a);
 
     p.next_stage();
 }
@@ -322,6 +350,17 @@ fn gather_ix(pixmap: PixmapRef, mut x: f32x8, mut y: f32x8) -> u32x8 {
     y = y.max(f32x8::default()).min(f32x8::splat(h));
 
     (y.trunc_int() * i32x8::splat(pixmap.stride() as i32) + x.trunc_int() * i32x8::splat(4)).to_u32x8_bitcast()
+}
+
+#[inline(always)]
+fn gather_ix_f16(pixmap: PixmapRef, mut x: f32x8, mut y: f32x8) -> u32x8 {
+    // Exclusive -> inclusive.
+    let w = ulp_sub(pixmap.width() as f32);
+    let h = ulp_sub(pixmap.height() as f32);
+    x = x.max(f32x8::default()).min(f32x8::splat(w));
+    y = y.max(f32x8::default()).min(f32x8::splat(h));
+
+    (y.trunc_int() * i32x8::splat(pixmap.stride() as i32) + x.trunc_int() * i32x8::splat(8)).to_u32x8_bitcast()
 }
 
 #[inline(always)]
@@ -667,7 +706,7 @@ fn clip_color(r: &mut f32x8, g: &mut f32x8, b: &mut f32x8, a: f32x8) {
 }
 
 pub fn source_over_rgba(p: &mut Pipeline) {
-    let pixels = p.pixmap_dst.slice4_at_xy(p.dx, p.dy);
+    let pixels = p.pixmap_dst.slice4_at_xy_u8888(p.dx, p.dy);
     load_8888(pixels, &mut p.dr, &mut p.dg, &mut p.db, &mut p.da);
     p.r = mad(p.dr, inv(p.a), p.r);
     p.g = mad(p.dg, inv(p.a), p.g);
@@ -679,13 +718,37 @@ pub fn source_over_rgba(p: &mut Pipeline) {
 }
 
 pub fn source_over_rgba_tail(p: &mut Pipeline) {
-    let pixels = p.pixmap_dst.slice_at_xy(p.dx, p.dy);
+    let pixels = p.pixmap_dst.slice_at_xy_u8888(p.dx, p.dy);
     load_8888_tail(p.tail, pixels, &mut p.dr, &mut p.dg, &mut p.db, &mut p.da);
     p.r = mad(p.dr, inv(p.a), p.r);
     p.g = mad(p.dg, inv(p.a), p.g);
     p.b = mad(p.db, inv(p.a), p.b);
     p.a = mad(p.da, inv(p.a), p.a);
     store_8888_tail(&p.r, &p.g, &p.b, &p.a, p.tail, pixels);
+
+    p.next_stage();
+}
+
+pub fn source_over_rgba_f16(p: &mut Pipeline) {
+    let pixels = p.pixmap_dst.slice4_at_xy_f16161616(p.dx, p.dy);
+    load_f16161616(pixels, &mut p.dr, &mut p.dg, &mut p.db, &mut p.da);
+    p.r = mad(p.dr, inv(p.a), p.r);
+    p.g = mad(p.dg, inv(p.a), p.g);
+    p.b = mad(p.db, inv(p.a), p.b);
+    p.a = mad(p.da, inv(p.a), p.a);
+    store_f16161616(&p.r, &p.g, &p.b, &p.a, pixels);
+
+    p.next_stage();
+}
+
+pub fn source_over_rgba_f16_tail(p: &mut Pipeline) {
+    let pixels = p.pixmap_dst.slice_at_xy_f16161616(p.dx, p.dy);
+    load_f16161616_tail(p.tail, pixels, &mut p.dr, &mut p.dg, &mut p.db, &mut p.da);
+    p.r = mad(p.dr, inv(p.a), p.r);
+    p.g = mad(p.dg, inv(p.a), p.g);
+    p.b = mad(p.db, inv(p.a), p.b);
+    p.a = mad(p.da, inv(p.a), p.a);
+    store_f16161616_tail(&p.r, &p.g, &p.b, &p.a, p.tail, pixels);
 
     p.next_stage();
 }
@@ -738,7 +801,7 @@ fn exclusive_repeat(v: f32x8, limit: f32, inv_limit: f32) -> f32x8 {
     v - (v * f32x8::splat(inv_limit)).floor() * f32x8::splat(limit)
 }
 
-fn bilinear(p: &mut Pipeline) {
+pub fn bilinear(p: &mut Pipeline) {
     let x = p.r;
     let fx = (x + f32x8::splat(0.5)).fract();
     let y = p.g;
@@ -747,12 +810,26 @@ fn bilinear(p: &mut Pipeline) {
     let wx = [one - fx, fx];
     let wy = [one - fy, fy];
 
-    sampler_2x2(p.pixmap_src, &p.ctx.sampler, x, y, &wx, &wy, &mut p.r, &mut p.g, &mut p.b, &mut p.a);
+    sampler_2x2::<SampleU8888>(p.pixmap_src, &p.ctx.sampler, x, y, &wx, &wy, &mut p.r, &mut p.g, &mut p.b, &mut p.a);
 
     p.next_stage();
 }
 
-fn bicubic(p: &mut Pipeline) {
+pub fn bilinear_f16(p: &mut Pipeline) {
+    let x = p.r;
+    let fx = (x + f32x8::splat(0.5)).fract();
+    let y = p.g;
+    let fy = (y + f32x8::splat(0.5)).fract();
+    let one = f32x8::splat(1.0);
+    let wx = [one - fx, fx];
+    let wy = [one - fy, fy];
+
+    sampler_2x2::<SampleF16161616>(p.pixmap_src, &p.ctx.sampler, x, y, &wx, &wy, &mut p.r, &mut p.g, &mut p.b, &mut p.a);
+
+    p.next_stage();
+}
+
+pub fn bicubic(p: &mut Pipeline) {
     let x = p.r;
     let fx = (x + f32x8::splat(0.5)).fract();
     let y = p.g;
@@ -761,10 +838,25 @@ fn bicubic(p: &mut Pipeline) {
     let wx = [bicubic_far(one - fx), bicubic_near(one - fx), bicubic_near(fx), bicubic_far(fx)];
     let wy = [bicubic_far(one - fy), bicubic_near(one - fy), bicubic_near(fy), bicubic_far(fy)];
 
-    sampler_4x4(p.pixmap_src, &p.ctx.sampler, x, y, &wx, &wy, &mut p.r, &mut p.g, &mut p.b, &mut p.a);
+    sampler_4x4::<SampleU8888>(p.pixmap_src, &p.ctx.sampler, x, y, &wx, &wy, &mut p.r, &mut p.g, &mut p.b, &mut p.a);
 
     p.next_stage();
 }
+
+pub fn bicubic_f16(p: &mut Pipeline) {
+    let x = p.r;
+    let fx = (x + f32x8::splat(0.5)).fract();
+    let y = p.g;
+    let fy = (y + f32x8::splat(0.5)).fract();
+    let one = f32x8::splat(1.0);
+    let wx = [bicubic_far(one - fx), bicubic_near(one - fx), bicubic_near(fx), bicubic_far(fx)];
+    let wy = [bicubic_far(one - fy), bicubic_near(one - fy), bicubic_near(fy), bicubic_far(fy)];
+
+    sampler_4x4::<SampleF16161616>(p.pixmap_src, &p.ctx.sampler, x, y, &wx, &wy, &mut p.r, &mut p.g, &mut p.b, &mut p.a);
+
+    p.next_stage();
+}
+
 
 // In bicubic interpolation, the 16 pixels and +/- 0.5 and +/- 1.5 offsets from the sample
 // pixel center are combined with a non-uniform cubic filter, with higher values near the center.
@@ -794,8 +886,42 @@ fn bicubic_far(t: f32x8) -> f32x8 {
     (t * t) * mad(f32x8::splat(7.0/18.0), t, f32x8::splat(-6.0/18.0))
 }
 
+trait SampleFn {
+    fn sample(pixmap: PixmapRef, ctx: &super::SamplerCtx, x: f32x8, y: f32x8,
+              r: &mut f32x8, g: &mut f32x8, b: &mut f32x8, a: &mut f32x8);
+}
+
+struct SampleU8888;
+struct SampleF16161616;
+
+impl SampleFn for SampleU8888 {
+    #[inline(always)]
+    fn sample(pixmap: PixmapRef, ctx: &super::SamplerCtx, mut x: f32x8, mut y: f32x8,
+            r: &mut f32x8, g: &mut f32x8, b: &mut f32x8, a: &mut f32x8)
+    {
+        x = tile(x, ctx.spread_mode, pixmap.width() as f32, ctx.inv_width);
+        y = tile(y, ctx.spread_mode, pixmap.height() as f32, ctx.inv_height);
+
+        let ix = gather_ix(pixmap, x, y);
+        load_8888(&pixmap.gather_u8888(ix), r, g, b, a);
+    }
+}
+
+impl SampleFn for SampleF16161616 {
+    #[inline(always)]
+    fn sample(pixmap: PixmapRef, ctx: &super::SamplerCtx, mut x: f32x8, mut y: f32x8,
+          r: &mut f32x8, g: &mut f32x8, b: &mut f32x8, a: &mut f32x8)
+    {
+        x = tile(x, ctx.spread_mode, pixmap.width() as f32, ctx.inv_width);
+        y = tile(y, ctx.spread_mode, pixmap.height() as f32, ctx.inv_height);
+
+        let ix = gather_ix_f16(pixmap, x, y);
+        load_f16161616(&pixmap.gather_f16161616(ix), r, g, b, a);
+    }
+}
+
 #[inline(always)]
-fn sampler_2x2(
+fn sampler_2x2<S: SampleFn>(
     pixmap: PixmapRef,
     ctx: &super::SamplerCtx,
     cx: f32x8, cy: f32x8,
@@ -817,7 +943,7 @@ fn sampler_2x2(
             let mut gg = f32x8::default();
             let mut bb = f32x8::default();
             let mut aa = f32x8::default();
-            sample(pixmap, ctx, x,y, &mut rr, &mut gg, &mut bb, &mut aa);
+            S::sample(pixmap, ctx, x,y, &mut rr, &mut gg, &mut bb, &mut aa);
 
             let w = wx[i] * wy[j];
             *r = mad(w, rr, *r);
@@ -833,7 +959,7 @@ fn sampler_2x2(
 }
 
 #[inline(always)]
-fn sampler_4x4(
+fn sampler_4x4<S: SampleFn>(
     pixmap: PixmapRef,
     ctx: &super::SamplerCtx,
     cx: f32x8, cy: f32x8,
@@ -855,7 +981,7 @@ fn sampler_4x4(
             let mut gg = f32x8::default();
             let mut bb = f32x8::default();
             let mut aa = f32x8::default();
-            sample(pixmap, ctx, x,y, &mut rr, &mut gg, &mut bb, &mut aa);
+            S::sample(pixmap, ctx, x,y, &mut rr, &mut gg, &mut bb, &mut aa);
 
             let w = wx[i] * wy[j];
             *r = mad(w, rr, *r);
@@ -868,18 +994,6 @@ fn sampler_4x4(
 
         y += one;
     }
-}
-
-#[inline(always)]
-fn sample(
-    pixmap: PixmapRef, ctx: &super::SamplerCtx, mut x: f32x8, mut y: f32x8,
-    r: &mut f32x8, g: &mut f32x8, b: &mut f32x8, a: &mut f32x8,
-) {
-    x = tile(x, ctx.spread_mode, pixmap.width() as f32, ctx.inv_width);
-    y = tile(y, ctx.spread_mode, pixmap.height() as f32, ctx.inv_height);
-
-    let ix = gather_ix(pixmap, x, y);
-    load_8888(&pixmap.gather(ix), r, g, b, a);
 }
 
 #[inline(always)]
@@ -1337,6 +1451,102 @@ fn store_8888_tail(
         }
     }
 }
+
+
+#[inline(always)]
+fn load_f16161616(
+    data: &[PremultipliedColorF16; STAGE_WIDTH],
+    r: &mut f32x8, g: &mut f32x8, b: &mut f32x8, a: &mut f32x8,
+) {
+    let data = [
+        data[ 0].to_color(), data[ 1].to_color(), data[ 2].to_color(), data[ 3].to_color(),
+        data[ 4].to_color(), data[ 5].to_color(), data[ 6].to_color(), data[ 7].to_color(),
+    ];
+
+    *r = f32x8::from([
+        data[0].red(), data[1].red(), data[2].red(), data[3].red(),
+        data[4].red(), data[5].red(), data[6].red(), data[7].red(),
+    ]);
+
+    *g = f32x8::from([
+        data[0].green(), data[1].green(), data[2].green(), data[3].green(),
+        data[4].green(), data[5].green(), data[6].green(), data[7].green(),
+    ]);
+
+    *b = f32x8::from([
+        data[0].blue(), data[1].blue(), data[2].blue(), data[3].blue(),
+        data[4].blue(), data[5].blue(), data[6].blue(), data[7].blue(),
+    ]);
+
+    *a = f32x8::from([
+        data[0].alpha(), data[1].alpha(), data[2].alpha(), data[3].alpha(),
+        data[4].alpha(), data[5].alpha(), data[6].alpha(), data[7].alpha(),
+    ]);
+}
+
+#[inline(always)]
+fn load_f16161616_tail(
+    tail: usize, data: &[PremultipliedColorF16],
+    r: &mut f32x8, g: &mut f32x8, b: &mut f32x8, a: &mut f32x8,
+) {
+    // Fill a dummy array with `tail` values. `tail` is always in a 1..STAGE_WIDTH-1 range.
+    // This way we can reuse the `load_8888_` method and remove any branches.
+    let mut tmp = [PremultipliedColorF16::TRANSPARENT; STAGE_WIDTH];
+    tmp[0..tail].copy_from_slice(&data[0..tail]);
+    load_f16161616(&tmp, r, g, b, a);
+}
+
+#[inline(always)]
+fn store_f16161616(
+    r: &f32x8, g: &f32x8, b: &f32x8, a: &f32x8,
+    data: &mut [PremultipliedColorF16; STAGE_WIDTH],
+) {
+    let clamp = |v: &f32x8| v.max(f32x8::default()).min(f32x8::splat(1.0));
+
+    let r: [f32; 8] = clamp(r).into();
+    let g: [f32; 8] = clamp(g).into();
+    let b: [f32; 8] = clamp(b).into();
+    let a: [f32; 8] = clamp(a).into();
+
+    let conv = |rr, gg, bb, aa|
+        PremultipliedColorF16::from_rgba_unchecked_fast(rr, gg, bb, aa);
+
+    data[0] = conv(r[0], g[0], b[0], a[0]);
+    data[1] = conv(r[1], g[1], b[1], a[1]);
+    data[2] = conv(r[2], g[2], b[2], a[2]);
+    data[3] = conv(r[3], g[3], b[3], a[3]);
+    data[4] = conv(r[4], g[4], b[4], a[4]);
+    data[5] = conv(r[5], g[5], b[5], a[5]);
+    data[6] = conv(r[6], g[6], b[6], a[6]);
+    data[7] = conv(r[7], g[7], b[7], a[7]);
+}
+
+#[inline(always)]
+fn store_f16161616_tail(
+    r: &f32x8, g: &f32x8, b: &f32x8, a: &f32x8,
+    tail: usize, data: &mut [PremultipliedColorF16],
+) {
+    let clamp = |v: &f32x8| v.max(f32x8::default()).min(f32x8::splat(1.0));
+
+    let r: [f32; 8] = clamp(r).into();
+    let g: [f32; 8] = clamp(g).into();
+    let b: [f32; 8] = clamp(b).into();
+    let a: [f32; 8] = clamp(a).into();
+
+    // This is better than `for i in 0..tail`, because this way the compiler
+    // knows that we have only 4 steps and slices access is guarantee to be valid.
+    // This removes bounds checking and a possible panic call.
+    for i in 0..STAGE_WIDTH {
+        data[i] = PremultipliedColorF16::from_rgba_unchecked_fast(
+            r[i], g[i], b[i], a[i],
+        );
+
+        if i + 1 == tail {
+            break;
+        }
+    }
+}
+
 
 #[inline(always)]
 fn unnorm(v: &f32x8) -> i32x8 {

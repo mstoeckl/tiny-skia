@@ -15,7 +15,7 @@ use tiny_skia_path::IntSize;
 
 use crate::{Color, IntRect, PremultipliedColor};
 
-use crate::color::PremultipliedColorU8;
+use crate::color::{PremultipliedColorF16, PremultipliedColorU8};
 
 #[cfg(feature = "png-format")]
 use crate::color::{premultiply_u8, ALPHA_U8_OPAQUE};
@@ -31,6 +31,16 @@ pub enum PixelType {
     ///
     /// Unit white is (255,255,255,255).
     Rgba8U,
+    /// 16-bit premultiplied native endian IEEE 754 half float in R,G,B,A memory order.
+    ///
+    /// See [PremultipliedColorF16]
+    ///
+    /// Subnormal numbers are explicitly permitted. NaN, +/- inf, negative zero, and
+    /// anything else outside range [0, 1] are not expected and may yield garbage
+    /// output, but should not cause panics or crashes.
+    ///
+    /// Unit white is (1.0, 1.0, 1.0, 1.0).
+    Rgba16F,
 }
 
 impl PixelType {
@@ -39,6 +49,7 @@ impl PixelType {
     pub const fn size(&self) -> u8 {
         match self {
             PixelType::Rgba8U => 4,
+            PixelType::Rgba16F => 8,
         }
     }
 
@@ -47,9 +58,18 @@ impl PixelType {
     pub const fn alignment(&self) -> u8 {
         match self {
             PixelType::Rgba8U => 1,
+            PixelType::Rgba16F => 2,
         }
     }
 }
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[repr(align(2))]
+pub struct Aligned2([u8; 2]);
+
+// Perfectly safe, since [u8; 2] is already Pod.
+unsafe impl bytemuck::Zeroable for Aligned2 {}
+unsafe impl bytemuck::Pod for Aligned2 {}
 
 /// Utility type for an owned buffer which may have a particular alignment
 /// constraint, used by [Pixmap].
@@ -61,6 +81,9 @@ impl PixelType {
 /// alignment requirement) could indeed produce [`Box<[u8]>`]s with memory address
 /// value ≡ 1 mod 2.
 ///
+/// Note that [PixelType::Rgba16F] uses the Align2 entry, even on systems where
+/// `std::mem::align_of::<f16>()` is 1.
+///
 /// Because strides need not be a multiple of the pixel size, transmuting the
 /// entire contents to a slice of pixels will not work unless you know the Pixmap
 /// that produced this was tightly packed (which [Pixmap::new] does by default).
@@ -71,11 +94,14 @@ impl PixelType {
 pub enum AlignedMemory {
     /// Used for [PixelType::Rgba8U]
     Align1(Box<[u8]>),
+    /// Used for [PixelType::Rgba16F]
+    Align2(Box<[Aligned2]>),
 }
 
 /// A container that owns premultiplied RGBA pixels.
 ///
-/// The data is only guaranteed to be aligned to match the PixelType.
+/// The data is only guaranteed to be aligned to match the [PixelType]'s
+/// requirement.
 #[derive(Clone, PartialEq)]
 pub struct Pixmap {
     data: AlignedMemory,
@@ -118,6 +144,7 @@ impl Pixmap {
     /// Zero size in an error.
     ///
     /// Pixmap's width is limited by i32::MAX/pix_type.size().
+    ///
     pub fn new_with_type(
         width: u32,
         height: u32,
@@ -132,6 +159,7 @@ impl Pixmap {
         let data_len = data_len_for_size(size, stride)?;
 
         let data = AlignedMemory::Align1(vec![0; data_len].into_boxed_slice());
+
         Some(Pixmap {
             data,
             size,
@@ -161,9 +189,12 @@ impl Pixmap {
         }
         let data_len = data_len_for_size(size, stride)?;
 
-        let AlignedMemory::Align1(buf) = &data;
+        let buf_len = match &data {
+            AlignedMemory::Align1(buf) => buf.len(),
+            AlignedMemory::Align2(buf) => 2 * buf.len(),
+        };
 
-        if buf.len() != data_len {
+        if buf_len != data_len {
             return None;
         }
 
@@ -378,6 +409,7 @@ impl Pixmap {
     pub fn data(&self) -> &[u8] {
         match &self.data {
             AlignedMemory::Align1(mem) => mem,
+            AlignedMemory::Align2(mem) => bytemuck::cast_slice(mem),
         }
     }
 
@@ -387,6 +419,7 @@ impl Pixmap {
     pub fn data_mut(&mut self) -> &mut [u8] {
         match &mut self.data {
             AlignedMemory::Align1(mem) => mem,
+            AlignedMemory::Align2(mem) => bytemuck::cast_slice_mut(mem),
         }
     }
 
@@ -419,6 +452,19 @@ impl Pixmap {
                 for pixel in pixels_mut {
                     let c = pixel.demultiply();
                     *pixel = PremultipliedColorU8::from_rgba_unchecked(
+                        c.red(),
+                        c.green(),
+                        c.blue(),
+                        c.alpha(),
+                    );
+                }
+            }
+            PixelType::Rgba16F => {
+                let pixels_mut: &mut [PremultipliedColorF16] =
+                    bytemuck::cast_slice_mut(self.data_mut());
+                for pixel in pixels_mut {
+                    let c = pixel.demultiply().to_color();
+                    *pixel = PremultipliedColorF16::from_rgba_unchecked(
                         c.red(),
                         c.green(),
                         c.blue(),
@@ -604,6 +650,13 @@ impl<'a> PixmapRef<'a> {
                 let color_u8 = row[x as usize];
                 Some(color_u8.to_color())
             }
+            PixelType::Rgba16F => {
+                let row = bytemuck::cast_slice::<_, PremultipliedColorF16>(
+                    &row[..self.width() as usize * 8],
+                );
+                let color_f16 = row[x as usize];
+                Some(color_f16.to_color())
+            }
         }
     }
 
@@ -622,13 +675,31 @@ impl<'a> PixmapRef<'a> {
         // Sadly, we have to copy the pixmap here, because of demultiplication.
         // Not sure how to avoid this. (png::Encoder::stream_writer_with_size?)
         // TODO: remove allocation
-        let AlignedMemory::Align1(demultiplied_data) = self.to_owned().take_demultiplied();
+        let mut buf = self.to_owned().take_demultiplied();
+        let demultiplied_data: &mut [u8] = match &mut buf {
+            AlignedMemory::Align1(data) => data,
+            AlignedMemory::Align2(data) => bytemuck::cast_slice_mut(data),
+        };
+
+        match self.pixel_type {
+            PixelType::Rgba8U => (),
+            PixelType::Rgba16F => {
+                for b in demultiplied_data.chunks_mut(2) {
+                    let v = half::f16::from_ne_bytes(b.try_into().unwrap());
+                    b.copy_from_slice(
+                        &((v.to_f32() * 65535.0).round_ties_even() as u16).to_be_bytes(),
+                    );
+                }
+            }
+        }
+
         let mut data = Vec::new();
         {
             let mut encoder = png::Encoder::new(&mut data, self.width(), self.height());
             encoder.set_color(png::ColorType::Rgba);
             match self.pixel_type {
                 PixelType::Rgba8U => encoder.set_depth(png::BitDepth::Eight),
+                PixelType::Rgba16F => encoder.set_depth(png::BitDepth::Sixteen),
             }
             let mut writer = encoder.write_header()?;
             writer.write_image_data(&demultiplied_data)?;
@@ -806,6 +877,59 @@ impl<'a> PixmapMut<'a> {
                         *p = c;
                     }
                 }
+            }
+            PixelType::Rgba16F => {
+                let c = color.premultiply().to_color_f16();
+                for y in 0..self.height() {
+                    let row = &mut self.data[y as usize * stride..y as usize * stride + row_len];
+                    for p in bytemuck::cast_slice_mut(row) {
+                        *p = c;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Copy the contents of a different Pixmap into this one, converting the [PixelType]
+    /// of the data.
+    ///
+    /// The sizes must match exactly, or this function will panic.
+    pub fn copy_and_cast(&mut self, src: &PixmapRef) {
+        assert!(self.size() == src.size());
+
+        let src_bpp = usize::from(src.pixel_type.size());
+
+        let dst_bpp = usize::from(self.pixel_type.size());
+        let dst_type = self.pixel_type();
+
+        for y in 0..self.height() {
+            let dst_start = y as usize * self.stride();
+            let src_start = y as usize * src.stride();
+            let dst_len = (self.width() as usize) * dst_bpp;
+            let src_len = (self.width() as usize) * src_bpp;
+
+            let src_row = &src.data()[src_start..src_start + src_len];
+            let dst_row = &mut self.data[dst_start..dst_start + dst_len];
+
+            for x in 0..src.width() {
+                let color = match src.pixel_type() {
+                    PixelType::Rgba8U => bytemuck::cast_slice::<_, PremultipliedColorU8>(src_row)
+                        [x as usize]
+                        .to_color(),
+                    PixelType::Rgba16F => bytemuck::cast_slice::<_, PremultipliedColorF16>(src_row)
+                        [x as usize]
+                        .to_color(),
+                };
+                match dst_type {
+                    PixelType::Rgba8U => {
+                        bytemuck::cast_slice_mut::<_, PremultipliedColorU8>(dst_row)[x as usize] =
+                            color.to_color_u8();
+                    }
+                    PixelType::Rgba16F => {
+                        bytemuck::cast_slice_mut::<_, PremultipliedColorF16>(dst_row)[x as usize] =
+                            color.to_color_f16();
+                    }
+                };
             }
         }
     }

@@ -194,6 +194,183 @@ impl core::fmt::Debug for PremultipliedColorU8 {
     }
 }
 
+/// An RGBA color value with half-float (ieee754 binary16) color
+/// channels.
+///
+/// Values are presently limited to the range [0,1]; library changes
+/// may be needed to lift this limitation.
+///
+/// As Rust's standard library has not yet stabilized f16, this avoids
+/// exposing the internal type. Reinterpret the memory if you need it.
+///
+/// Byteorder: RGBA (relevant for bytemuck casts)
+#[repr(transparent)]
+#[derive(Copy, Clone, PartialEq)]
+pub struct ColorF16([half::f16; 4]);
+
+// Perfectly safe, since [half::f16; 4] is already Pod.
+unsafe impl bytemuck::Zeroable for ColorF16 {}
+unsafe impl bytemuck::Pod for ColorF16 {}
+
+impl ColorF16 {
+    /// A transparent color.
+    pub const TRANSPARENT: Self = ColorF16::from_color(Color::TRANSPARENT);
+
+    /// Creates a new [ColorF16], rounding values arbitrarily
+    pub const fn from_color(color: Color) -> Self {
+        ColorF16([
+            half::f16::from_f32_const(color.r.get()),
+            half::f16::from_f32_const(color.g.get()),
+            half::f16::from_f32_const(color.b.get()),
+            half::f16::from_f32_const(color.a.get()),
+        ])
+    }
+
+    /// Check that color is opaque.
+    ///
+    /// Alpha == 255
+    pub fn is_opaque(&self) -> bool {
+        self.0[3] == half::f16::ONE
+    }
+
+    /// Converts into a premultiplied color.
+    pub fn premultiply(&self) -> PremultipliedColorF16 {
+        let a = self.0[3];
+        if a == half::f16::ONE {
+            // Fast path
+            PremultipliedColorF16([self.0[0], self.0[1], self.0[2], half::f16::ONE])
+        } else {
+            PremultipliedColorF16([self.0[0] * a, self.0[1] * a, self.0[2] * a, a])
+        }
+    }
+
+    /// Converts into `Color`.
+    pub fn to_color(&self) -> Color {
+        Color {
+            r: NormalizedF32::new_clamped(f32::from(self.0[0])),
+            g: NormalizedF32::new_clamped(f32::from(self.0[1])),
+            b: NormalizedF32::new_clamped(f32::from(self.0[2])),
+            a: NormalizedF32::new_clamped(f32::from(self.0[3])),
+        }
+    }
+}
+
+impl core::fmt::Debug for ColorF16 {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let color = self.to_color();
+        f.debug_struct("ColorF16")
+            .field("r", &color.red())
+            .field("g", &color.green())
+            .field("b", &color.blue())
+            .field("a", &color.alpha())
+            .finish()
+    }
+}
+
+/// A 32-bit premultiplied RGBA color value.
+///
+/// Byteorder: RGBA (relevant for bytemuck casts)
+#[repr(transparent)]
+#[derive(Copy, Clone, PartialEq)]
+pub struct PremultipliedColorF16([half::f16; 4]);
+
+// Perfectly safe, since [half::f16; 4] is already Pod.
+unsafe impl bytemuck::Zeroable for PremultipliedColorF16 {}
+unsafe impl bytemuck::Pod for PremultipliedColorF16 {}
+
+impl PremultipliedColorF16 {
+    /// A transparent color.
+    pub const TRANSPARENT: Self = PremultipliedColorF16::from_rgba_unchecked(0.0, 0.0, 0.0, 0.0);
+
+    /// Creates a new premultiplied color.
+    ///
+    /// RGB components must be >= 0 and <= alpha, and alpha must be <= 1.0
+    pub fn from_rgba(r: f32, g: f32, b: f32, a: f32) -> Option<Self> {
+        let (r, g, b, a) = (
+            half::f16::from_f32_const(r),
+            half::f16::from_f32_const(g),
+            half::f16::from_f32_const(b),
+            half::f16::from_f32_const(a),
+        );
+        if half::f16::ZERO <= r
+            && half::f16::ZERO <= g
+            && half::f16::ZERO <= b
+            && r <= a
+            && g <= a
+            && b <= a
+            && a <= half::f16::ONE
+        {
+            Some(PremultipliedColorF16([r, g, b, a]))
+        } else {
+            None
+        }
+    }
+
+    /// Creates a new color.
+    pub(crate) const fn from_rgba_unchecked(r: f32, g: f32, b: f32, a: f32) -> Self {
+        PremultipliedColorF16([
+            half::f16::from_f32_const(r),
+            half::f16::from_f32_const(g),
+            half::f16::from_f32_const(b),
+            half::f16::from_f32_const(a),
+        ])
+    }
+
+    pub(crate) fn from_rgba_unchecked_fast(r: f32, g: f32, b: f32, a: f32) -> Self {
+        PremultipliedColorF16([
+            half::f16::from_f32(r),
+            half::f16::from_f32(g),
+            half::f16::from_f32(b),
+            half::f16::from_f32(a),
+        ])
+    }
+
+    /// Check that color is opaque.
+    ///
+    /// Alpha == 255
+    pub fn is_opaque(&self) -> bool {
+        self.0[3] == half::f16::ONE
+    }
+
+    /// Returns a demultiplied color.
+    pub fn demultiply(&self) -> ColorF16 {
+        let alpha = self.0[3];
+        if alpha == half::f16::ZERO {
+            ColorF16::TRANSPARENT
+        } else {
+            // For floats in [0,1], 0 <= x <= y implies 0 <= x / y <= 1.0
+            ColorF16([
+                self.0[0] / alpha,
+                self.0[1] / alpha,
+                self.0[2] / alpha,
+                alpha,
+            ])
+        }
+    }
+
+    /// Converts into `PremultipliedColor`.
+    pub fn to_color(&self) -> PremultipliedColor {
+        PremultipliedColor {
+            r: NormalizedF32::new_clamped(f32::from(self.0[0])),
+            g: NormalizedF32::new_clamped(f32::from(self.0[1])),
+            b: NormalizedF32::new_clamped(f32::from(self.0[2])),
+            a: NormalizedF32::new_clamped(f32::from(self.0[3])),
+        }
+    }
+}
+
+impl core::fmt::Debug for PremultipliedColorF16 {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let color = self.to_color();
+        f.debug_struct("PremultipliedColorF16")
+            .field("r", &color.red())
+            .field("g", &color.green())
+            .field("b", &color.blue())
+            .field("a", &color.alpha())
+            .finish()
+    }
+}
+
 /// An RGBA color value, holding four floating point components.
 ///
 /// # Guarantees
@@ -435,6 +612,16 @@ impl PremultipliedColor {
     pub fn to_color_u8(&self) -> PremultipliedColorU8 {
         let c = color_f32_to_u8(self.r, self.g, self.b, self.a);
         PremultipliedColorU8::from_rgba_unchecked(c[0], c[1], c[2], c[3])
+    }
+
+    /// Converts into `PremultipliedColorF16`.
+    pub fn to_color_f16(&self) -> PremultipliedColorF16 {
+        PremultipliedColorF16::from_rgba_unchecked(
+            self.r.get(),
+            self.g.get(),
+            self.b.get(),
+            self.a.get(),
+        )
     }
 }
 

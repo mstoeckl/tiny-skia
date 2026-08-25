@@ -30,6 +30,7 @@ On ARM AArch64 the story is different and explicit SIMD make our code up to 2-3x
 
 use crate::PremultipliedColorU8;
 
+use crate::color::PremultipliedColorF16;
 use crate::pipeline::GenericPixmapMut;
 use crate::wide::{f32x8, u16x16, f32x16};
 use crate::geom::ScreenIntRect;
@@ -267,34 +268,54 @@ fn seed_shader(p: &mut Pipeline) {
 }
 
 pub fn load_dst(p: &mut Pipeline) {
-    load_8888(p.pixmap.slice16_at_xy(p.dx, p.dy), &mut p.dr, &mut p.dg, &mut p.db, &mut p.da);
+    load_8888(p.pixmap.slice16_at_xy_u8888(p.dx, p.dy), &mut p.dr, &mut p.dg, &mut p.db, &mut p.da);
     p.next_stage();
 }
 
 pub fn load_dst_tail(p: &mut Pipeline) {
-    load_8888_tail(p.tail, p.pixmap.slice_at_xy(p.dx, p.dy), &mut p.dr, &mut p.dg, &mut p.db, &mut p.da);
+    load_8888_tail(p.tail, p.pixmap.slice_at_xy_u8888(p.dx, p.dy), &mut p.dr, &mut p.dg, &mut p.db, &mut p.da);
     p.next_stage();
 }
 
 pub fn store(p: &mut Pipeline) {
-    store_8888(&p.r, &p.g, &p.b, &p.a, p.pixmap.slice16_at_xy(p.dx, p.dy));
+    store_8888(&p.r, &p.g, &p.b, &p.a, p.pixmap.slice16_at_xy_u8888(p.dx, p.dy));
     p.next_stage();
 }
 
 pub fn store_tail(p: &mut Pipeline) {
-    store_8888_tail(&p.r, &p.g, &p.b, &p.a, p.tail, p.pixmap.slice_at_xy(p.dx, p.dy));
+    store_8888_tail(&p.r, &p.g, &p.b, &p.a, p.tail, p.pixmap.slice_at_xy_u8888(p.dx, p.dy));
+    p.next_stage();
+}
+
+pub fn load_dst_f16(p: &mut Pipeline) {
+    load_f16161616(p.pixmap.slice16_at_xy_f16161616(p.dx, p.dy), &mut p.dr, &mut p.dg, &mut p.db, &mut p.da);
+    p.next_stage();
+}
+
+pub fn load_dst_f16_tail(p: &mut Pipeline) {
+    load_f16161616_tail(p.tail, p.pixmap.slice_at_xy_f16161616(p.dx, p.dy), &mut p.dr, &mut p.dg, &mut p.db, &mut p.da);
+    p.next_stage();
+}
+
+pub fn store_f16(p: &mut Pipeline) {
+    store_f16161616(&p.r, &p.g, &p.b, &p.a, p.pixmap.slice16_at_xy_f16161616(p.dx, p.dy));
+    p.next_stage();
+}
+
+pub fn store_f16_tail(p: &mut Pipeline) {
+    store_f16161616_tail(&p.r, &p.g, &p.b, &p.a, p.tail, p.pixmap.slice_at_xy_f16161616(p.dx, p.dy));
     p.next_stage();
 }
 
 pub fn load_dst_u8(p: &mut Pipeline) {
-    load_8(p.pixmap.slice16_mask_at_xy(p.dx, p.dy), &mut p.da);
+    load_8(p.pixmap.slice16_mask_at_xy_u8(p.dx, p.dy), &mut p.da);
     p.next_stage();
 }
 
 pub fn load_dst_u8_tail(p: &mut Pipeline) {
     // Fill a dummy array with `tail` values. `tail` is always in a 1..STAGE_WIDTH-1 range.
     // This way we can reuse the `load_8888__` method and remove any branches.
-    let data = p.pixmap.slice_mask_at_xy(p.dx, p.dy);
+    let data = p.pixmap.slice_mask_at_xy_u8(p.dx, p.dy);
     let mut tmp = [0u8; STAGE_WIDTH];
     tmp[0..p.tail].copy_from_slice(&data[0..p.tail]);
     load_8(&tmp, &mut p.da);
@@ -303,7 +324,7 @@ pub fn load_dst_u8_tail(p: &mut Pipeline) {
 }
 
 pub fn store_u8(p: &mut Pipeline) {
-    let data = p.pixmap.slice16_mask_at_xy(p.dx, p.dy);
+    let data = p.pixmap.slice16_mask_at_xy_u8(p.dx, p.dy);
     let a = p.a.as_slice();
 
     data[ 0] = a[ 0] as u8;
@@ -327,7 +348,7 @@ pub fn store_u8(p: &mut Pipeline) {
 }
 
 pub fn store_u8_tail(p: &mut Pipeline) {
-    let data = p.pixmap.slice_mask_at_xy(p.dx, p.dy);
+    let data = p.pixmap.slice_mask_at_xy_u8(p.dx, p.dy);
     let a = p.a.as_slice();
 
     // This is better than `for i in 0..tail`, because this way the compiler
@@ -532,7 +553,7 @@ blend_fn2!(overlay, |s: u16x16, d: u16x16, sa, da| {
 });
 
 pub fn source_over_rgba(p: &mut Pipeline) {
-    let pixels = p.pixmap.slice16_at_xy(p.dx, p.dy);
+    let pixels = p.pixmap.slice16_at_xy_u8888(p.dx, p.dy);
     load_8888(pixels, &mut p.dr, &mut p.dg, &mut p.db, &mut p.da);
     p.r = p.r + div255(p.dr * inv(p.a));
     p.g = p.g + div255(p.dg * inv(p.a));
@@ -544,13 +565,37 @@ pub fn source_over_rgba(p: &mut Pipeline) {
 }
 
 pub fn source_over_rgba_tail(p: &mut Pipeline) {
-    let pixels = p.pixmap.slice_at_xy(p.dx, p.dy);
+    let pixels = p.pixmap.slice_at_xy_u8888(p.dx, p.dy);
     load_8888_tail(p.tail, pixels, &mut p.dr, &mut p.dg, &mut p.db, &mut p.da);
     p.r = p.r + div255(p.dr * inv(p.a));
     p.g = p.g + div255(p.dg * inv(p.a));
     p.b = p.b + div255(p.db * inv(p.a));
     p.a = p.a + div255(p.da * inv(p.a));
     store_8888_tail(&p.r, &p.g, &p.b, &p.a, p.tail, pixels);
+
+    p.next_stage();
+}
+
+pub fn source_over_rgba_f16(p: &mut Pipeline) {
+    let pixels = p.pixmap.slice16_at_xy_f16161616(p.dx, p.dy);
+    load_f16161616(pixels, &mut p.dr, &mut p.dg, &mut p.db, &mut p.da);
+    p.r = p.r + div255(p.dr * inv(p.a));
+    p.g = p.g + div255(p.dg * inv(p.a));
+    p.b = p.b + div255(p.db * inv(p.a));
+    p.a = p.a + div255(p.da * inv(p.a));
+    store_f16161616(&p.r, &p.g, &p.b, &p.a, pixels);
+
+    p.next_stage();
+}
+
+pub fn source_over_rgba_f16_tail(p: &mut Pipeline) {
+    let pixels = p.pixmap.slice_at_xy_f16161616(p.dx, p.dy);
+    load_f16161616_tail(p.tail, pixels, &mut p.dr, &mut p.dg, &mut p.db, &mut p.da);
+    p.r = p.r + div255(p.dr * inv(p.a));
+    p.g = p.g + div255(p.dg * inv(p.a));
+    p.b = p.b + div255(p.db * inv(p.a));
+    p.a = p.a + div255(p.da * inv(p.a));
+    store_f16161616_tail(&p.r, &p.g, &p.b, &p.a, p.tail, pixels);
 
     p.next_stage();
 }
@@ -834,6 +879,116 @@ fn store_8888_tail(
         }
     }
 }
+
+
+#[inline(always)]
+fn load_f16161616(
+    data: &[PremultipliedColorF16; STAGE_WIDTH],
+    r: &mut u16x16, g: &mut u16x16, b: &mut u16x16, a: &mut u16x16,
+) {
+    let data = [
+        data[ 0].to_color().to_color_u8(), data[ 1].to_color().to_color_u8(),
+        data[ 2].to_color().to_color_u8(), data[ 3].to_color().to_color_u8(),
+        data[ 4].to_color().to_color_u8(), data[ 5].to_color().to_color_u8(),
+        data[ 6].to_color().to_color_u8(), data[ 7].to_color().to_color_u8(),
+        data[ 8].to_color().to_color_u8(), data[ 9].to_color().to_color_u8(),
+        data[10].to_color().to_color_u8(), data[11].to_color().to_color_u8(),
+        data[12].to_color().to_color_u8(), data[13].to_color().to_color_u8(),
+        data[14].to_color().to_color_u8(), data[15].to_color().to_color_u8(),
+    ];
+    *r = u16x16([
+        data[ 0].red() as u16, data[ 1].red() as u16, data[ 2].red() as u16, data[ 3].red() as u16,
+        data[ 4].red() as u16, data[ 5].red() as u16, data[ 6].red() as u16, data[ 7].red() as u16,
+        data[ 8].red() as u16, data[ 9].red() as u16, data[10].red() as u16, data[11].red() as u16,
+        data[12].red() as u16, data[13].red() as u16, data[14].red() as u16, data[15].red() as u16,
+    ]);
+
+    *g = u16x16([
+        data[ 0].green() as u16, data[ 1].green() as u16, data[ 2].green() as u16, data[ 3].green() as u16,
+        data[ 4].green() as u16, data[ 5].green() as u16, data[ 6].green() as u16, data[ 7].green() as u16,
+        data[ 8].green() as u16, data[ 9].green() as u16, data[10].green() as u16, data[11].green() as u16,
+        data[12].green() as u16, data[13].green() as u16, data[14].green() as u16, data[15].green() as u16,
+    ]);
+
+    *b = u16x16([
+        data[ 0].blue() as u16, data[ 1].blue() as u16, data[ 2].blue() as u16, data[ 3].blue() as u16,
+        data[ 4].blue() as u16, data[ 5].blue() as u16, data[ 6].blue() as u16, data[ 7].blue() as u16,
+        data[ 8].blue() as u16, data[ 9].blue() as u16, data[10].blue() as u16, data[11].blue() as u16,
+        data[12].blue() as u16, data[13].blue() as u16, data[14].blue() as u16, data[15].blue() as u16,
+    ]);
+
+    *a = u16x16([
+        data[ 0].alpha() as u16, data[ 1].alpha() as u16, data[ 2].alpha() as u16, data[ 3].alpha() as u16,
+        data[ 4].alpha() as u16, data[ 5].alpha() as u16, data[ 6].alpha() as u16, data[ 7].alpha() as u16,
+        data[ 8].alpha() as u16, data[ 9].alpha() as u16, data[10].alpha() as u16, data[11].alpha() as u16,
+        data[12].alpha() as u16, data[13].alpha() as u16, data[14].alpha() as u16, data[15].alpha() as u16,
+    ]);
+}
+
+#[inline(always)]
+fn load_f16161616_tail(
+    tail: usize, data: &[PremultipliedColorF16],
+    r: &mut u16x16, g: &mut u16x16, b: &mut u16x16, a: &mut u16x16,
+) {
+    // Fill a dummy array with `tail` values. `tail` is always in a 1..STAGE_WIDTH-1 range.
+    // This way we can reuse the `load_8888__` method and remove any branches.
+    let mut tmp = [PremultipliedColorF16::TRANSPARENT; STAGE_WIDTH];
+    tmp[0..tail].copy_from_slice(&data[0..tail]);
+    load_f16161616(&tmp, r, g, b, a);
+}
+
+#[inline(always)]
+fn store_f16161616(
+    r: &u16x16, g: &u16x16, b: &u16x16, a: &u16x16,
+    data: &mut [PremultipliedColorF16; STAGE_WIDTH],
+) {
+    let r = r.as_slice();
+    let g = g.as_slice();
+    let b = b.as_slice();
+    let a = a.as_slice();
+
+    data[ 0] = PremultipliedColorU8::from_rgba_unchecked(r[ 0] as u8, g[ 0] as u8, b[ 0] as u8, a[ 0] as u8).to_color().to_color_f16();
+    data[ 1] = PremultipliedColorU8::from_rgba_unchecked(r[ 1] as u8, g[ 1] as u8, b[ 1] as u8, a[ 1] as u8).to_color().to_color_f16();
+    data[ 2] = PremultipliedColorU8::from_rgba_unchecked(r[ 2] as u8, g[ 2] as u8, b[ 2] as u8, a[ 2] as u8).to_color().to_color_f16();
+    data[ 3] = PremultipliedColorU8::from_rgba_unchecked(r[ 3] as u8, g[ 3] as u8, b[ 3] as u8, a[ 3] as u8).to_color().to_color_f16();
+    data[ 4] = PremultipliedColorU8::from_rgba_unchecked(r[ 4] as u8, g[ 4] as u8, b[ 4] as u8, a[ 4] as u8).to_color().to_color_f16();
+    data[ 5] = PremultipliedColorU8::from_rgba_unchecked(r[ 5] as u8, g[ 5] as u8, b[ 5] as u8, a[ 5] as u8).to_color().to_color_f16();
+    data[ 6] = PremultipliedColorU8::from_rgba_unchecked(r[ 6] as u8, g[ 6] as u8, b[ 6] as u8, a[ 6] as u8).to_color().to_color_f16();
+    data[ 7] = PremultipliedColorU8::from_rgba_unchecked(r[ 7] as u8, g[ 7] as u8, b[ 7] as u8, a[ 7] as u8).to_color().to_color_f16();
+    data[ 8] = PremultipliedColorU8::from_rgba_unchecked(r[ 8] as u8, g[ 8] as u8, b[ 8] as u8, a[ 8] as u8).to_color().to_color_f16();
+    data[ 9] = PremultipliedColorU8::from_rgba_unchecked(r[ 9] as u8, g[ 9] as u8, b[ 9] as u8, a[ 9] as u8).to_color().to_color_f16();
+    data[10] = PremultipliedColorU8::from_rgba_unchecked(r[10] as u8, g[10] as u8, b[10] as u8, a[10] as u8).to_color().to_color_f16();
+    data[11] = PremultipliedColorU8::from_rgba_unchecked(r[11] as u8, g[11] as u8, b[11] as u8, a[11] as u8).to_color().to_color_f16();
+    data[12] = PremultipliedColorU8::from_rgba_unchecked(r[12] as u8, g[12] as u8, b[12] as u8, a[12] as u8).to_color().to_color_f16();
+    data[13] = PremultipliedColorU8::from_rgba_unchecked(r[13] as u8, g[13] as u8, b[13] as u8, a[13] as u8).to_color().to_color_f16();
+    data[14] = PremultipliedColorU8::from_rgba_unchecked(r[14] as u8, g[14] as u8, b[14] as u8, a[14] as u8).to_color().to_color_f16();
+    data[15] = PremultipliedColorU8::from_rgba_unchecked(r[15] as u8, g[15] as u8, b[15] as u8, a[15] as u8).to_color().to_color_f16();
+}
+
+#[inline(always)]
+fn store_f16161616_tail(
+    r: &u16x16, g: &u16x16, b: &u16x16, a: &u16x16,
+    tail: usize, data: &mut [PremultipliedColorF16],
+) {
+    let r = r.as_slice();
+    let g = g.as_slice();
+    let b = b.as_slice();
+    let a = a.as_slice();
+
+    // This is better than `for i in 0..tail`, because this way the compiler
+    // knows that we have only 16 steps and slices access is guarantee to be valid.
+    // This removes bounds checking and a possible panic call.
+    for i in 0..STAGE_WIDTH {
+        data[i] = PremultipliedColorU8::from_rgba_unchecked(
+            r[i] as u8, g[i] as u8, b[i] as u8, a[i] as u8,
+        ).to_color().to_color_f16();
+
+        if i + 1 == tail {
+            break;
+        }
+    }
+}
+
 
 #[inline(always)]
 fn load_8(data: &[u8; STAGE_WIDTH], a: &mut u16x16) {

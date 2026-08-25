@@ -521,7 +521,8 @@ impl PixmapMut<'_> {
         // Just a dummy.
         let pixmap_src = PixmapRef::from_bytes(&[0, 0, 0, 0], 1, 1).unwrap();
 
-        let mut p = RasterPipelineBuilder::new();
+        let mut p =
+            RasterPipelineBuilder::new(self.pixel_type().into(), pixmap_src.pixel_type().into());
         p.push(pipeline::Stage::LoadMaskU8);
         p.push(pipeline::Stage::LoadDestination);
         p.push(pipeline::Stage::DestinationIn);

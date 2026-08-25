@@ -178,6 +178,9 @@ fn draw_pixmap_opacity() {
 fn type_overlay() {
     let stacks: [(PixelType, PixelType, &'static str); _] = [
         (PixelType::Rgba8U, PixelType::Rgba8U, "8u-on-8u"),
+        (PixelType::Rgba8U, PixelType::Rgba16F, "8u-on-16f"),
+        (PixelType::Rgba16F, PixelType::Rgba8U, "16f-on-8u"),
+        (PixelType::Rgba16F, PixelType::Rgba16F, "16f-on-16f"),
     ];
 
     for (base_type, over_type, name) in stacks {
@@ -241,7 +244,26 @@ fn type_overlay() {
 
         let expected =
             Pixmap::load_png(format!("tests/images/pixmap/overlay-{}.png", name)).unwrap();
-        let packed = pixmap.as_ref().to_owned();
-        assert_eq!(expected, packed);
+
+        let expected_pixels: &[PremultipliedColorU8] = bytemuck::cast_slice(expected.data());
+
+        let mut cast = Pixmap::new(pixmap.width(), pixmap.height()).unwrap();
+        cast.as_mut().copy_and_cast(&pixmap.as_ref());
+
+        let cast_pixels: &[PremultipliedColorU8] = bytemuck::cast_slice(cast.data());
+        let max_err = cast_pixels
+            .iter()
+            .zip(expected_pixels.iter())
+            .map(|(a, b)| {
+                (a.red().abs_diff(b.red()))
+                    .max(a.green().abs_diff(b.green()))
+                    .max(a.blue().abs_diff(b.blue()))
+                    .max(a.alpha().abs_diff(b.alpha()))
+            })
+            .max()
+            .unwrap();
+
+        // Saving and opening an image converts f16->u16->u8, which may by off by 1 from f16->u8
+        assert!(max_err <= 1);
     }
 }

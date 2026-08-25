@@ -4,7 +4,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::{BlendMode, Color, LengthU32, Paint, PixmapRef, PremultipliedColorU8, Shader};
+use crate::{
+    BlendMode, Color, LengthU32, Paint, PixmapRef, PremultipliedColorF16, PremultipliedColorU8,
+    Shader,
+};
 use crate::{ALPHA_U8_OPAQUE, ALPHA_U8_TRANSPARENT};
 
 use crate::alpha_runs::AlphaRun;
@@ -33,7 +36,7 @@ impl<'a: 'c, 'b: 'a, 'c> PipelineDest<'a, 'b> {
 pub struct RasterPipelineBlitter<'a, 'b: 'a> {
     mask: Option<SubMaskRef<'a>>,
     pixmap_src: PixmapRef<'a>,
-    pixmap_dst: PipelineDest<'a, 'b>,
+    dest: PipelineDest<'a, 'b>,
     memset2d_color: Option<PremultipliedColorU8>,
     blit_anti_h_rp: RasterPipeline,
     blit_rect_rp: RasterPipeline,
@@ -89,8 +92,17 @@ impl<'a, 'b: 'a> RasterPipelineBlitter<'a, 'b> {
             memset2d_color = Some(PremultipliedColorU8::TRANSPARENT);
         }
 
+        let pixmap_src = match paint.shader {
+            Shader::Pattern(ref patt) => patt.pixmap,
+            // Just a dummy one.
+            _ => PixmapRef::from_bytes(&[0, 0, 0, 0], 1, 1).unwrap(),
+        };
+
         let blit_anti_h_rp = {
-            let mut p = RasterPipelineBuilder::new();
+            let mut p = RasterPipelineBuilder::new(
+                pixmap.pixel_type().into(),
+                pixmap_src.pixel_type().into(),
+            );
             p.set_force_hq_pipeline(paint.force_hq_pipeline);
             if !paint.shader.push_stages(paint.colorspace, &mut p) {
                 return None;
@@ -130,7 +142,10 @@ impl<'a, 'b: 'a> RasterPipelineBlitter<'a, 'b> {
         };
 
         let blit_rect_rp = {
-            let mut p = RasterPipelineBuilder::new();
+            let mut p = RasterPipelineBuilder::new(
+                pixmap.pixel_type().into(),
+                pixmap_src.pixel_type().into(),
+            );
             p.set_force_hq_pipeline(paint.force_hq_pipeline);
             if !paint.shader.push_stages(paint.colorspace, &mut p) {
                 return None;
@@ -167,7 +182,10 @@ impl<'a, 'b: 'a> RasterPipelineBlitter<'a, 'b> {
         };
 
         let blit_mask_rp = {
-            let mut p = RasterPipelineBuilder::new();
+            let mut p = RasterPipelineBuilder::new(
+                pixmap.pixel_type().into(),
+                pixmap_src.pixel_type().into(),
+            );
             p.set_force_hq_pipeline(paint.force_hq_pipeline);
             if !paint.shader.push_stages(paint.colorspace, &mut p) {
                 return None;
@@ -206,16 +224,10 @@ impl<'a, 'b: 'a> RasterPipelineBlitter<'a, 'b> {
             p.compile()
         };
 
-        let pixmap_src = match paint.shader {
-            Shader::Pattern(ref patt) => patt.pixmap,
-            // Just a dummy one.
-            _ => PixmapRef::from_bytes(&[0, 0, 0, 0], 1, 1).unwrap(),
-        };
-
         Some(RasterPipelineBlitter {
             mask,
             pixmap_src,
-            pixmap_dst: PipelineDest::Pixmap(pixmap),
+            dest: PipelineDest::Pixmap(pixmap),
             memset2d_color,
             blit_anti_h_rp,
             blit_rect_rp,
@@ -229,7 +241,8 @@ impl<'a, 'b: 'a> RasterPipelineBlitter<'a, 'b> {
         let memset2d_color = Some(color.to_color_u8());
 
         let blit_anti_h_rp = {
-            let mut p = RasterPipelineBuilder::new();
+            let mut p =
+                RasterPipelineBuilder::new(PixelType::Rgba8U.into(), PixelType::Rgba8U.into());
             p.push_uniform_color(color);
             p.push(pipeline::Stage::LoadDestinationU8);
             p.push(pipeline::Stage::Lerp1Float);
@@ -238,14 +251,16 @@ impl<'a, 'b: 'a> RasterPipelineBlitter<'a, 'b> {
         };
 
         let blit_rect_rp = {
-            let mut p = RasterPipelineBuilder::new();
+            let mut p =
+                RasterPipelineBuilder::new(PixelType::Rgba8U.into(), PixelType::Rgba8U.into());
             p.push_uniform_color(color);
             p.push(pipeline::Stage::StoreU8);
             p.compile()
         };
 
         let blit_mask_rp = {
-            let mut p = RasterPipelineBuilder::new();
+            let mut p =
+                RasterPipelineBuilder::new(PixelType::Rgba8U.into(), PixelType::Rgba8U.into());
             p.push_uniform_color(color);
             p.push(pipeline::Stage::LoadDestinationU8);
             p.push(pipeline::Stage::LerpU8);
@@ -256,7 +271,7 @@ impl<'a, 'b: 'a> RasterPipelineBlitter<'a, 'b> {
         Some(RasterPipelineBlitter {
             mask: None,
             pixmap_src: PixmapRef::from_bytes(&[0, 0, 0, 0], 1, 1).unwrap(),
-            pixmap_dst: PipelineDest::Mask(mask),
+            dest: PipelineDest::Mask(mask),
             memset2d_color,
             blit_anti_h_rp,
             blit_rect_rp,
@@ -294,7 +309,7 @@ impl Blitter for RasterPipelineBlitter<'_, '_> {
                         pipeline::AAMaskCtx::default(),
                         mask_ctx,
                         self.pixmap_src,
-                        self.pixmap_dst.to_generic_pixmap(),
+                        self.dest.to_generic_pixmap(),
                     );
                 }
             }
@@ -344,12 +359,14 @@ impl Blitter for RasterPipelineBlitter<'_, '_> {
 
     fn blit_rect(&mut self, rect: &ScreenIntRect) {
         if let Some(c) = self.memset2d_color {
-            match &mut self.pixmap_dst {
+            match &mut self.dest {
                 PipelineDest::Mask(mask) => {
                     for y in 0..rect.height() {
-                        let start = mask.real_width * ((rect.y() + y) as usize) + rect.x() as usize;
+                        let start = mask.real_width * (rect.y() + y) as usize + rect.x() as usize;
                         let end = start + rect.width() as usize;
-                        mask.data[start..end].fill(c.alpha());
+                        mask.data[start..end]
+                            .iter_mut()
+                            .for_each(|p| *p = c.alpha());
                     }
                 }
                 PipelineDest::Pixmap(pixmap) => {
@@ -363,6 +380,16 @@ impl Blitter for RasterPipelineBlitter<'_, '_> {
                                         [start..start + 4 * rect.width() as usize],
                                 );
                                 row_pixels.fill(c);
+                            }
+                            PixelType::Rgba16F => {
+                                let start = pixmap.stride() * (rect.y() + y) as usize
+                                    + 8 * rect.x() as usize;
+                                let row_pixels = bytemuck::cast_slice_mut::<_, PremultipliedColorF16>(
+                                    &mut pixmap.data_mut()
+                                        [start..start + 8 * rect.width() as usize],
+                                );
+                                let cf = c.to_color().to_color_f16();
+                                row_pixels.fill(cf);
                             }
                         }
                     }
@@ -379,7 +406,7 @@ impl Blitter for RasterPipelineBlitter<'_, '_> {
             pipeline::AAMaskCtx::default(),
             mask_ctx,
             self.pixmap_src,
-            self.pixmap_dst.to_generic_pixmap(),
+            self.dest.to_generic_pixmap(),
         );
     }
 
@@ -397,7 +424,7 @@ impl Blitter for RasterPipelineBlitter<'_, '_> {
             aa_mask_ctx,
             mask_ctx,
             self.pixmap_src,
-            self.pixmap_dst.to_generic_pixmap(),
+            self.dest.to_generic_pixmap(),
         );
     }
 }
