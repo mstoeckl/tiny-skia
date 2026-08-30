@@ -4,6 +4,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -50,12 +51,34 @@ impl PixelType {
     }
 }
 
+/// Utility type for an owned buffer which may have a particular alignment
+/// constraint, used by [Pixmap].
+///
+/// [PixelType]s with alignment requirements greater than 1 cannot be stored
+/// directly in a [`Box<[u8]>`], because Rust's allocation rules do not guarantee
+/// that [`Box<[u8]>`]'s data is aligned to a multiple of any value other than 1,
+/// and allocator implementations (for example, a bump allocator sharded by
+/// alignment requirement) could indeed produce [`Box<[u8]>`]s with memory address
+/// value ≡ 1 mod 2.
+///
+/// Because strides need not be a multiple of the pixel size, transmuting the
+/// entire contents to a slice of pixels will not work unless you know the Pixmap
+/// that produced this was tightly packed (which [Pixmap::new] does by default).
+///
+/// If a new [PixelType] with a higher alignment requirement is added, this enum
+/// will gain an option like `Align2`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlignedMemory {
+    /// Used for [PixelType::Rgba8U]
+    Align1(Box<[u8]>),
+}
+
 /// A container that owns premultiplied RGBA pixels.
 ///
 /// The data is only guaranteed to be aligned to match the PixelType.
 #[derive(Clone, PartialEq)]
 pub struct Pixmap {
-    data: Vec<u8>,
+    data: AlignedMemory,
     size: IntSize,
     /// The number of bytes between the starts of two rows
     stride: usize,
@@ -78,8 +101,10 @@ impl Pixmap {
         // We cannot check that allocation was successful yet.
         // We have to wait for https://github.com/rust-lang/rust/issues/48043
 
+        let data = AlignedMemory::Align1(vec![0; data_len].into_boxed_slice());
+
         Some(Pixmap {
-            data: vec![0; data_len],
+            data,
             size,
             stride: stride.get(),
             pixel_type: PixelType::Rgba8U,
@@ -93,11 +118,6 @@ impl Pixmap {
     /// Zero size in an error.
     ///
     /// Pixmap's width is limited by i32::MAX/pix_type.size().
-    ///
-    /// This may arbitrarily fail with allocators that do not align
-    /// Vec<u8> to multiples of pix_type.alignment() in practice. For
-    /// reliable construction, manage your own memory and use PixmapMut
-    /// or PixmapRef.
     pub fn new_with_type(
         width: u32,
         height: u32,
@@ -110,17 +130,8 @@ impl Pixmap {
             return None;
         }
         let data_len = data_len_for_size(size, stride)?;
-        let data: Vec<u8> = vec![0; data_len];
 
-        // TODO: Rust does not provide a way to reliably produce an aligned
-        // Vec<u8>, as its allocators may make type alignment dependent decisions.
-        // If this becomes an issue in practice, Pixmap could overallocate by
-        // pixel_type.alignment() and offset any access to the data accordingly;
-        // but this will break methods like 'take()'.
-        if data.as_ptr() as usize % usize::from(pixel_type.alignment()) != 0 {
-            return None;
-        }
-
+        let data = AlignedMemory::Align1(vec![0; data_len].into_boxed_slice());
         Some(Pixmap {
             data,
             size,
@@ -136,8 +147,8 @@ impl Pixmap {
     /// Zero size in an error.
     ///
     /// Pixmap's width is limited by i32::MAX/pix_type.size().
-    pub fn from_vec_with_type(
-        data: Vec<u8>,
+    pub fn from_mem_with_type(
+        data: AlignedMemory,
         width: u32,
         height: u32,
         stride: usize,
@@ -149,11 +160,10 @@ impl Pixmap {
             return None;
         }
         let data_len = data_len_for_size(size, stride)?;
-        if data.len() != data_len {
-            return None;
-        }
 
-        if data.as_ptr() as usize % usize::from(pixel_type.alignment()) != 0 {
+        let AlignedMemory::Align1(buf) = &data;
+
+        if buf.len() != data_len {
             return None;
         }
 
@@ -179,7 +189,7 @@ impl Pixmap {
         }
 
         Some(Pixmap {
-            data,
+            data: AlignedMemory::Align1(data.into_boxed_slice()),
             size,
             stride: stride.get(),
             pixel_type: PixelType::Rgba8U,
@@ -307,21 +317,23 @@ impl Pixmap {
 
     /// Returns a container that references Pixmap's data.
     pub fn as_ref(&self) -> PixmapRef<'_> {
+        let (size, stride, pixel_type) = (self.size, self.stride, self.pixel_type);
         PixmapRef {
-            data: &self.data,
-            size: self.size,
-            stride: self.stride,
-            pixel_type: self.pixel_type,
+            data: self.data(),
+            size,
+            stride,
+            pixel_type,
         }
     }
 
     /// Returns a container that references Pixmap's data.
     pub fn as_mut(&mut self) -> PixmapMut<'_> {
+        let (size, stride, pixel_type) = (self.size, self.stride, self.pixel_type);
         PixmapMut {
-            data: &mut self.data,
-            size: self.size,
-            stride: self.stride,
-            pixel_type: self.pixel_type,
+            data: self.data_mut(),
+            size,
+            stride,
+            pixel_type,
         }
     }
 
@@ -364,14 +376,18 @@ impl Pixmap {
     ///
     /// Byteorder: RGBA
     pub fn data(&self) -> &[u8] {
-        self.data.as_slice()
+        match &self.data {
+            AlignedMemory::Align1(mem) => mem,
+        }
     }
 
     /// Returns the mutable internal data.
     ///
     /// Byteorder: RGBA
     pub fn data_mut(&mut self) -> &mut [u8] {
-        self.data.as_mut_slice()
+        match &mut self.data {
+            AlignedMemory::Align1(mem) => mem,
+        }
     }
 
     /// Returns a pixel color, converted to `Color`.
@@ -384,14 +400,14 @@ impl Pixmap {
     /// Consumes the internal data.
     ///
     /// See [PixelType] and [Self::stride()] for the data layout.
-    pub fn take(self) -> Vec<u8> {
+    pub fn take(self) -> AlignedMemory {
         self.data
     }
 
     /// Consumes the pixmap and returns the internal data as demultiplied RGBA bytes.
     ///
     /// See [PixelType] for the data layout.
-    pub fn take_demultiplied(mut self) -> Vec<u8> {
+    pub fn take_demultiplied(mut self) -> AlignedMemory {
         // Demultiply alpha.
         //
         // RasterPipeline is 15% faster here, but produces slightly different results
@@ -606,7 +622,7 @@ impl<'a> PixmapRef<'a> {
         // Sadly, we have to copy the pixmap here, because of demultiplication.
         // Not sure how to avoid this. (png::Encoder::stream_writer_with_size?)
         // TODO: remove allocation
-        let demultiplied_data = self.to_owned().take_demultiplied();
+        let AlignedMemory::Align1(demultiplied_data) = self.to_owned().take_demultiplied();
         let mut data = Vec::new();
         {
             let mut encoder = png::Encoder::new(&mut data, self.width(), self.height());
